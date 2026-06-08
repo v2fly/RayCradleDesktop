@@ -1,0 +1,112 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+            artifact: RayCradleDesktop-windows-amd64
+          - name: macOS
+            os: macos-latest
+            goos: darwin
+            goarch: ""
+            artifact: RayCradleDesktop-macos
+          - name: Linux AppImage
+            os: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            artifact: RayCradleDesktop-linux-amd64-appimage
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            desktop-file-utils \
+            file \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            zip
+          sudo apt-get install -y --no-install-recommends libfuse2t64 || \
+            sudo apt-get install -y --no-install-recommends libfuse2 || true
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            go test -tags gtk3 ./...
+          else
+            go test ./...
+          fi
+
+      - name: Build release artifact
+        shell: bash
+        env:
+          RAYCRADLE_VERSION: ${{ github.ref_name }}
+          TARGET_GOOS: ${{ matrix.goos }}
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: bash scripts/build-release.sh
+
+      - name: Verify Windows binary
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          exes=(dist/release/*.exe)
+          if [[ "${#exes[@]}" -eq 0 ]]; then
+            echo "No Windows .exe was produced in dist/release" >&2
+            find dist -maxdepth 3 -type f -print >&2 || true
+            exit 1
+          fi
+          for exe in "${exes[@]}"; do
+            test -s "${exe}"
+            ls -lh "${exe}"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/release/*
+          if-no-files-found: error
