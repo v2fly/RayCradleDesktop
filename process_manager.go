@@ -122,14 +122,29 @@ func buildV2RayCommand(execDir string) commandSpec {
 }
 
 func currentExecutableDir() (string, error) {
+	if appImage := os.Getenv("APPIMAGE"); appImage != "" {
+		return executablePathDir(appImage)
+	}
+
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
-		executable = resolved
+	return executablePathDir(executable)
+}
+
+func executablePathDir(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve executable directory: %w", err)
+		}
+		path = absolute
 	}
-	return filepath.Dir(executable), nil
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Dir(path), nil
 }
 
 func (pm *ProcessManager) Start() error {
