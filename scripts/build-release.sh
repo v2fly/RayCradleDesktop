@@ -98,6 +98,14 @@ appimage_arch() {
     esac
 }
 
+debian_multiarch() {
+    case "$1" in
+        amd64) printf 'x86_64-linux-gnu' ;;
+        arm64) printf 'aarch64-linux-gnu' ;;
+        *) die "unsupported Debian multiarch target: $1" ;;
+    esac
+}
+
 linuxdeploy_url() {
     case "$1" in
         x86_64)
@@ -181,6 +189,113 @@ write_linux_icon() {
   <circle cx="84" cy="171" r="8" fill="#f8fafc"/>
 </svg>
 EOF
+}
+
+copy_linux_library_to_appdir() {
+    local appdir="$1"
+    local library="$2"
+    local multiarch="$3"
+    local source=""
+    local search_dir
+
+    for search_dir in "/usr/lib/${multiarch}" "/lib/${multiarch}" /usr/lib /lib; do
+        if [[ -e "${search_dir}/${library}" ]]; then
+            source="${search_dir}/${library}"
+            break
+        fi
+    done
+
+    [[ -n "${source}" ]] || die "unable to find Linux library ${library}"
+    cp -L "${source}" "${appdir}/usr/lib/${library}"
+    chmod 0644 "${appdir}/usr/lib/${library}"
+
+    if command -v patchelf >/dev/null 2>&1 && file "${appdir}/usr/lib/${library}" | grep -q 'ELF'; then
+        patchelf --set-rpath '$ORIGIN' "${appdir}/usr/lib/${library}" || true
+    fi
+}
+
+bundle_linux_text_stack_libraries() {
+    local appdir="$1"
+    local multiarch
+
+    multiarch="$(debian_multiarch "${target_goarch:-$(go env GOARCH)}")"
+
+    # linuxdeploy treats these as system libraries, but Debian Pango requires
+    # matching HarfBuzz symbols on older distributions.
+    copy_linux_library_to_appdir "${appdir}" libharfbuzz.so.0 "${multiarch}"
+    copy_linux_library_to_appdir "${appdir}" libfribidi.so.0 "${multiarch}"
+    copy_linux_library_to_appdir "${appdir}" libfreetype.so.6 "${multiarch}"
+	copy_linux_library_to_appdir "${appdir}" libfontconfig.so.1 "${multiarch}"
+}
+
+copy_linux_file_to_appdir() {
+	local source="$1"
+	local appdir="$2"
+	local target="${appdir}/${source#/}"
+
+	mkdir -p "$(dirname -- "${target}")"
+	cp -L "${source}" "${target}"
+	chmod 0755 "${target}"
+}
+
+bundle_webkitgtk_helpers() {
+	local appdir="$1"
+	local multiarch="$2"
+	local search_dirs file source
+	local found=0
+
+	search_dirs=(
+		"/usr/lib/${multiarch}"
+		/usr/lib64
+		/usr/lib
+		/usr/libexec
+	)
+
+	for file in \
+		webkit2gtk-4.1/WebKitNetworkProcess \
+		webkit2gtk-4.1/WebKitWebProcess \
+		webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so
+	do
+		for search_dir in "${search_dirs[@]}"; do
+			source="${search_dir}/${file}"
+			if [[ -e "${source}" ]]; then
+				copy_linux_file_to_appdir "${source}" "${appdir}"
+				found=$((found + 1))
+				break
+			fi
+		done
+	done
+
+	[[ "${found}" -ge 3 ]] || die "unable to find all WebKitGTK helper processes and injected bundle"
+}
+
+patch_webkitgtk_appdir_paths() {
+	local appdir="$1"
+	local file
+
+	while IFS= read -r -d '' file; do
+		sed -i -e "s|/usr|././|g" "${file}"
+	done < <(find "${appdir}/usr/lib" -type f -name 'libwebkit*' -print0)
+}
+
+patch_webkitgtk_helper_rpaths() {
+	local appdir="$1"
+	local file
+
+	command -v patchelf >/dev/null 2>&1 || return 0
+
+	for file in \
+		"${appdir}/usr/lib/"*/webkit2gtk-4.1/WebKitNetworkProcess \
+		"${appdir}/usr/lib/"*/webkit2gtk-4.1/WebKitWebProcess
+	do
+		[[ -e "${file}" ]] || continue
+		patchelf --set-rpath '$ORIGIN/../..' "${file}" || true
+	done
+
+	for file in "${appdir}/usr/lib/"*/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so; do
+		[[ -e "${file}" ]] || continue
+		patchelf --set-rpath '$ORIGIN/../../..' "${file}" || true
+	done
 }
 
 build_go_binary() {
@@ -282,7 +397,7 @@ package_linux_appimage() {
     local build_dir="$2"
     local out_dir="$3"
     local appdir="${build_dir}/${APP_NAME}.AppDir"
-    local appimagetool arch linuxdeploy out_file
+    local appimagetool arch linuxdeploy multiarch out_file
 
     mkdir -p \
         "${appdir}/usr/bin" \
@@ -292,13 +407,13 @@ package_linux_appimage() {
     build_go_binary "${appdir}/usr/bin/${APP_NAME}" "linux"
     chmod +x "${appdir}/usr/bin/${APP_NAME}"
 
-    cat >"${appdir}/AppRun" <<EOF
+	cat >"${appdir}/AppRun" <<EOF
 #!/usr/bin/env sh
 set -eu
 APPDIR="\$(dirname "\$(readlink -f "\$0")")"
-if [ -n "\${APPIMAGE:-}" ]; then
-    cd "\$(dirname "\$(readlink -f "\$APPIMAGE")")"
-fi
+export WEBKIT_DISABLE_DMABUF_RENDERER="\${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+export APPDIR
+cd "\${APPDIR}/usr"
 exec "\${APPDIR}/usr/bin/${APP_NAME}" "\$@"
 EOF
     chmod +x "${appdir}/AppRun"
@@ -321,36 +436,33 @@ EOF
         return
     fi
 
-    appimagetool="$(ensure_appimagetool)"
-    arch="$(appimage_arch "${target_goarch:-$(go env GOARCH)}")"
-    out_file="${out_dir}/${artifact_base}.AppImage"
-    mkdir -p "${out_dir}"
-    rm -f "${out_file}"
+	appimagetool="$(ensure_appimagetool)"
+	arch="$(appimage_arch "${target_goarch:-$(go env GOARCH)}")"
+	multiarch="$(debian_multiarch "${target_goarch:-$(go env GOARCH)}")"
+	out_file="${out_dir}/${artifact_base}.AppImage"
+	mkdir -p "${out_dir}"
+	rm -f "${out_file}"
 
-    linuxdeploy="$(ensure_linuxdeploy)"
-    if (
-        cd "${build_dir}"
-        LDAI_OUTPUT="${out_file}" ARCH="${arch}" APPIMAGE_EXTRACT_AND_RUN=1 \
+	bundle_webkitgtk_helpers "${appdir}" "${multiarch}"
+
+	linuxdeploy="$(ensure_linuxdeploy)"
+	if ! (
+		cd "${build_dir}"
+        ARCH="${arch}" APPIMAGE_EXTRACT_AND_RUN=1 \
             "${linuxdeploy}" \
                 --appdir "${appdir}" \
                 --executable "${appdir}/usr/bin/${APP_NAME}" \
                 --desktop-file "${appdir}/usr/share/applications/${APP_NAME}.desktop" \
-                --icon-file "${appdir}/usr/share/icons/hicolor/scalable/apps/${APP_NAME}.svg" \
-                --output appimage
+                --icon-file "${appdir}/usr/share/icons/hicolor/scalable/apps/${APP_NAME}.svg"
     ); then
-        if [[ ! -f "${out_file}" ]]; then
-            local generated
-            generated="$(find "${build_dir}" -maxdepth 1 -type f -name "*.AppImage" -print -quit)"
-            [[ -n "${generated}" ]] || die "linuxdeploy completed without producing an AppImage"
-            mv "${generated}" "${out_file}"
-        fi
-        chmod +x "${out_file}"
-        printf '%s\n' "${out_file}"
-        return
-    fi
+        die "linuxdeploy failed to populate ${appdir}"
+	fi
 
-    printf 'linuxdeploy failed; falling back to appimagetool...\n' >&2
-    appimagetool="$(ensure_appimagetool)"
+	bundle_linux_text_stack_libraries "${appdir}"
+	patch_webkitgtk_helper_rpaths "${appdir}"
+	patch_webkitgtk_appdir_paths "${appdir}"
+
+	appimagetool="$(ensure_appimagetool)"
     ARCH="${arch}" APPIMAGE_EXTRACT_AND_RUN=1 "${appimagetool}" "${appdir}" "${out_file}"
     chmod +x "${out_file}"
     printf '%s\n' "${out_file}"

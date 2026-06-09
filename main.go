@@ -44,6 +44,8 @@ func main() {
 }
 
 func run() error {
+	configureWebKitEnvironment()
+
 	desktop := &desktopApp{}
 	pm, err := NewProcessManager(WithExitHandler(desktop.onV2RayExit))
 	if err != nil {
@@ -377,6 +379,9 @@ func probeWebUI(ctx context.Context, client *http.Client, url string) (bool, err
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return false, fmt.Errorf("web ui returned %s", resp.Status)
+	}
+	if strings.TrimSpace(content) == "" {
+		return false, fmt.Errorf("web ui returned an empty response")
 	}
 	if strings.Contains(content, "Missing index.html") {
 		return false, fmt.Errorf("web ui returned missing index.html page")

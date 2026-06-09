@@ -53,15 +53,9 @@ type ProcessManager struct {
 type ProcessManagerOption func(*ProcessManager)
 
 func NewProcessManager(options ...ProcessManagerOption) (*ProcessManager, error) {
-	executableDir, err := currentExecutableDir()
-	if err != nil {
-		return nil, err
-	}
-
 	pm := &ProcessManager{
-		executableDir: executableDir,
-		retention:     outputRetention,
-		now:           time.Now,
+		retention: outputRetention,
+		now:       time.Now,
 	}
 	pm.cmdFactory = func(spec commandSpec) *exec.Cmd {
 		cmd := exec.Command(spec.Path, spec.Args...)
@@ -71,6 +65,13 @@ func NewProcessManager(options ...ProcessManagerOption) (*ProcessManager, error)
 
 	for _, option := range options {
 		option(pm)
+	}
+	if pm.executableDir == "" {
+		executableDir, err := currentExecutableDir()
+		if err != nil {
+			return nil, err
+		}
+		pm.executableDir = executableDir
 	}
 	if pm.retention <= 0 {
 		pm.retention = outputRetention

@@ -16,6 +16,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  LINUX_ROOTFS_SUITE: bookworm
+  MAX_GLIBC_VERSION: "2.36"
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -55,32 +57,25 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Linux build dependencies
+      - name: Check Linux rootfs prerequisites
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            curl \
-            desktop-file-utils \
-            file \
-            libgtk-3-dev \
-            libsoup-3.0-dev \
-            libwebkit2gtk-4.1-dev \
-            patchelf \
-            pkg-config \
-            zip
-          sudo apt-get install -y --no-install-recommends libfuse2t64 || \
-            sudo apt-get install -y --no-install-recommends libfuse2 || true
+          command -v unshare
+          command -v apt-get
+          command -v curl
+          command -v dpkg-deb
+          command -v file
+          command -v strings
+          command -v xzcat
 
       - name: Test
         shell: bash
         run: |
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
-            go test -tags gtk3 ./...
+            bash scripts/run-linux-rootfs.sh -- go test -tags gtk3 ./...
           else
             go test ./...
           fi
@@ -91,7 +86,18 @@ jobs:
           RAYCRADLE_VERSION: ${{ env.RELEASE_TAG }}
           TARGET_GOOS: ${{ matrix.goos }}
           TARGET_GOARCH: ${{ matrix.goarch }}
-        run: bash scripts/build-release.sh
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            bash scripts/run-linux-rootfs.sh -- bash scripts/build-release.sh
+          else
+            bash scripts/build-release.sh
+          fi
+
+      - name: Verify Linux AppImage glibc floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-appimage-glibc.sh dist/release/RayCradleDesktop-*.AppImage
 
       - name: Verify Windows binary
         if: runner.os == 'Windows'
