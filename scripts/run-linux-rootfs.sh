@@ -367,15 +367,19 @@ prepare_rootfs() {
     )
     packages_csv="$(csv_join "${packages[@]}")"
 
-    if [[ ! -e "${rootfs}/.raycradle-rootfs-ready-mmdebstrap-extract-v2" ]]; then
+    if [[ ! -e "${rootfs}/.raycradle-rootfs-ready-mmdebstrap-extract-v3" ]]; then
         rm -rf "${rootfs}"
         mkdir -p "${rootfs}"
 
+        # The script already runs inside unshare -r -m. Keep mmdebstrap out of
+        # nested unshare mode and skip its chroot mounts; the extract variant
+        # only needs package extraction, and runtime mounts are added below.
         TAR_OPTIONS=--no-same-owner \
             "${mmdebstrap_cmd}" \
-            --mode=unshare \
+            --mode=root \
             --format=directory \
             --variant=extract \
+            --skip=chroot/mount \
             --include="${packages_csv}" \
             --keyring="${debian_keyring}" \
             --aptopt='APT::Sandbox::User "root"' \
@@ -396,7 +400,7 @@ prepare_rootfs() {
             ln -s g++ "${rootfs}/usr/bin/c++"
         fi
 
-        touch "${rootfs}/.raycradle-rootfs-ready-mmdebstrap-extract-v2"
+        touch "${rootfs}/.raycradle-rootfs-ready-mmdebstrap-extract-v3"
         rootfs_created=1
     fi
 
