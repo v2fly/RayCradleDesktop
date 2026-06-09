@@ -271,11 +271,9 @@ bundle_webkitgtk_helpers() {
 
 patch_webkitgtk_appdir_paths() {
 	local appdir="$1"
-	local file
 
-	while IFS= read -r -d '' file; do
-		sed -i -e "s|/usr|././|g" "${file}"
-	done < <(find "${appdir}/usr/lib" -type f -name 'libwebkit*' -print0)
+	find "${appdir}/usr/lib" -type f -name 'libwebkit*' \
+		-exec sed -i -e "s|/usr|././|g" {} +
 }
 
 patch_webkitgtk_helper_rpaths() {
