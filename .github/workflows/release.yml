@@ -1,23 +1,27 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches:
-      - "**"
     tags:
       - "v*"
-  pull_request:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to release
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
 jobs:
   build:
-    name: ${{ matrix.name }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,6 +46,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -82,7 +88,7 @@ jobs:
       - name: Build release artifact
         shell: bash
         env:
-          RAYCRADLE_VERSION: ${{ github.ref_name }}
+          RAYCRADLE_VERSION: ${{ env.RELEASE_TAG }}
           TARGET_GOOS: ${{ matrix.goos }}
           TARGET_GOARCH: ${{ matrix.goarch }}
         run: bash scripts/build-release.sh
@@ -104,9 +110,55 @@ jobs:
             ls -lh "${exe}"
           done
 
-      - name: Upload artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: dist/release/RayCradleDesktop-*
+          path: |
+            dist/release/RayCradleDesktop-*.zip
+            dist/release/RayCradleDesktop-*.AppImage
           if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist/release
+          merge-multiple: true
+
+      - name: List release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist/release -maxdepth 1 -type f -print -exec ls -lh {} \;
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/release/RayCradleDesktop-*.zip dist/release/RayCradleDesktop-*.AppImage)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No RayCradleDesktop .zip or .AppImage release assets found" >&2
+            exit 1
+          fi
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --title "RayCradleDesktop ${RELEASE_TAG}" \
+              --notes "RayCradleDesktop ${RELEASE_TAG}"
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${assets[@]}" \
+              --verify-tag \
+              --title "RayCradleDesktop ${RELEASE_TAG}" \
+              --notes "RayCradleDesktop ${RELEASE_TAG}"
+          fi
