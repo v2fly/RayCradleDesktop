@@ -51,6 +51,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Allow Linux unprivileged user namespaces
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns is not present; skipping"
+          fi
+
       - name: Check Linux rootfs prerequisites
         if: runner.os == 'Linux'
         shell: bash
